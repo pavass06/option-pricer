@@ -40,8 +40,12 @@ def mc_price(S, K, T, r, sigma, kind="call", q=0.0, n_paths=100_000,
     rng = np.random.default_rng(seed)
 
     if antithetic:
-        half = rng.standard_normal((n_paths + 1) // 2)
-        z = np.concatenate([half, -half])[:n_paths]
+        # An odd n_paths is rounded up to the next even number so that every
+        # draw Z has its partner -Z (pairs are rows i and i + m below).
+        m = (n_paths + 1) // 2
+        n_paths = 2 * m
+        half = rng.standard_normal(m)
+        z = np.concatenate([half, -half])
     else:
         z = rng.standard_normal(n_paths)
 
@@ -55,9 +59,8 @@ def mc_price(S, K, T, r, sigma, kind="call", q=0.0, n_paths=100_000,
     if antithetic:
         # Pairs (Z, -Z) are dependent: average each pair so that the samples
         # used for the estimator and its standard error are i.i.d.
-        m = n_paths // 2
-        y = 0.5 * (y[:m] + y[m:2 * m])
-        x = 0.5 * (x[:m] + x[m:2 * m])
+        y = 0.5 * (y[:m] + y[m:])
+        x = 0.5 * (x[:m] + x[m:])
 
     if control_variate:
         cov = np.cov(y, x)
