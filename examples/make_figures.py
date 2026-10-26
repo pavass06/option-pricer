@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from option_pricer import bs_price, mc_price, crr_price  # noqa: E402
+from option_pricer import bs_price, bs_greeks, mc_price, crr_price  # noqa: E402
 
 OUT = Path(__file__).resolve().parents[1] / "docs"
 OUT.mkdir(exist_ok=True)
@@ -83,7 +83,72 @@ def price_surface_figure():
     plt.close(fig)
 
 
+def greeks_figure():
+    spots = np.linspace(50, 150, 201)
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6.4))
+    panels = [("price", "Price", 1), ("delta", "Delta", 1), ("gamma", "Gamma", 1),
+              ("vega", "Vega (per 1 vol point)", 100), ("theta", "Theta (per day)", 365),
+              ("rho", "Rho (per 1% rate)", 100)]
+    for kind, color in (("call", "#1f6feb"), ("put", "#d1495b")):
+        greeks = [bs_greeks(s, K, T, r, sigma, kind) for s in spots]
+        for ax, (attr, title, scale) in zip(axes.flat, panels):
+            ax.plot(spots, [getattr(g, attr) / scale for g in greeks], color=color, label=kind)
+    for ax, (_, title, _) in zip(axes.flat, panels):
+        ax.axvline(K, color="#999999", lw=0.8, ls=":")
+        ax.set_title(title)
+        ax.set_xlabel("Spot")
+        ax.grid(alpha=0.25)
+    axes[0, 0].legend()
+    fig.suptitle(f"Black-Scholes price and Greeks vs spot (K={K:.0f}, T={T:.0f}y, r={r:.0%}, "
+                 f"vol={sigma:.0%}); dotted line = strike", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(OUT / "greeks.png", dpi=130)
+    plt.close(fig)
+
+
+def monte_carlo_figure():
+    bs = bs_price(S0, K, T, r, sigma, "call")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
+
+    # Left: distribution of discounted payoffs for 100,000 paths
+    rng = np.random.default_rng(0)
+    z = rng.standard_normal(100_000)
+    s_t = S0 * np.exp((r - 0.5 * sigma ** 2) * T + sigma * np.sqrt(T) * z)
+    pay = np.exp(-r * T) * np.maximum(s_t - K, 0.0)
+    share_zero = (pay == 0).mean()
+    ax1.hist(pay[pay > 0], bins=80, color="#1f6feb", alpha=0.8)
+    ax1.axvline(pay.mean(), color="black", ls="--", lw=1, label=f"Mean = {pay.mean():.4f}")
+    ax1.set_xlim(0, np.quantile(pay, 0.999))
+    ax1.set_xlabel("Discounted payoff of the ATM call")
+    ax1.set_ylabel("Number of paths")
+    ax1.set_title(f"Payoff distribution (100,000 paths; {share_zero:.0%} expire worthless, not shown)",
+                  fontsize=10)
+    ax1.legend(fontsize=8)
+
+    # Right: 95% CI half-width vs number of paths, log-log
+    ns = np.unique(np.logspace(3, 6, 10).astype(int))
+    for label, anti, cv, color in [("Plain MC", False, False, "#9aa5b1"),
+                                   ("Antithetic", True, False, "#f4a259"),
+                                   ("Antithetic + control variate", True, True, "#1f6feb")]:
+        hw = [1.96 * mc_price(S0, K, T, r, sigma, "call", n_paths=int(n), antithetic=anti,
+                              control_variate=cv, seed=7).std_error for n in ns]
+        ax2.loglog(ns, hw, "o-", ms=3, color=color, label=label)
+    ax2.loglog(ns, hw[0] * np.sqrt(ns[0] / ns), color="black", lw=0.8, ls=":",
+               label="slope -1/2 (error ~ 1/sqrt(N))")
+    ax2.set_xlabel("Number of paths")
+    ax2.set_ylabel("95% CI half-width")
+    ax2.set_title(f"Confidence interval shrinks as 1/sqrt(N) (BS = {bs:.4f})", fontsize=10)
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.25, which="both")
+
+    fig.tight_layout()
+    fig.savefig(OUT / "monte_carlo.png", dpi=130)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     convergence_figure()
     price_surface_figure()
+    greeks_figure()
+    monte_carlo_figure()
     print(f"Figures written to {OUT}")

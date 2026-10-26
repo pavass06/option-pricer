@@ -4,6 +4,7 @@ No macros are needed. Run from the project root:  python excel/build_workbook.py
 """
 
 from pathlib import Path
+import sys
 
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
@@ -11,6 +12,9 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 
 OUT = Path(__file__).resolve().parent / "option_pricer.xlsx"
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from option_pricer import bs_price, crr_price, lsm_price, mc_price  # noqa: E402
 
 INPUT_FILL = PatternFill("solid", fgColor="FFF4CC")
 HEADER_FILL = PatternFill("solid", fgColor="1F3A5F")
@@ -139,6 +143,8 @@ def build():
     chart.y_axis.delete = False
     ws.add_chart(chart, "E4")
 
+    monte_carlo_sheet(wb)
+
     # --- Notes ----------------------------------------------------------------
     notes = wb.create_sheet("Notes")
     notes.column_dimensions["A"].width = 100
@@ -146,7 +152,9 @@ def build():
         "Model: Black-Scholes-Merton for European options, continuous dividend yield.",
         "Uses only long-standing functions (NORMSDIST, LN, EXP), so it works in any Excel version and LibreOffice.",
         "Greeks: vega and rho per 1 percentage point, theta per calendar day (annual / 365).",
-        "American options and Monte Carlo are only in the Python package (option_pricer).",
+        "The 'Monte Carlo' sheet holds values precomputed in Python (python excel/build_workbook.py);"
+        " they do not follow the yellow input cells.",
+        "American options are priced in Python (CRR tree, Longstaff-Schwartz); results are on the Monte Carlo sheet.",
         "Optional: vba/BlackScholes.bas adds a =BS_PRICE(...) user function (see README).",
     ], start=1):
         notes[f"A{i}"] = line
@@ -154,6 +162,90 @@ def build():
 
     wb.save(OUT)
     print(f"Workbook written to {OUT}")
+
+
+def monte_carlo_sheet(wb):
+    """Static sheet: Monte Carlo results computed in Python, plus a native line chart."""
+    S, K, T, r, sigma = 100.0, 100.0, 1.0, 0.05, 0.20
+    bs = bs_price(S, K, T, r, sigma, "call")
+    mc = wb.create_sheet("Monte Carlo", 1)
+    mc["A1"] = "Monte Carlo convergence, ATM European call (precomputed in Python)"
+    mc["A1"].font = Font(bold=True, size=14)
+    mc["A2"] = (f"S={S:.0f}, K={K:.0f}, T={T:.0f}y, r={r:.0%}, vol={sigma:.0%}, seed=N (one independent run per row). "
+                "Static values: re-run python excel/build_workbook.py to refresh.")
+    mc["A2"].font = Font(italic=True, color="666666")
+
+    cols = ["Paths (N)", "Black-Scholes", "Plain MC", "Plain low 95%", "Plain high 95%",
+            "Antithetic + CV", "Reduced low 95%", "Reduced high 95%", "Std error ratio"]
+    widths = [12, 14, 12, 14, 14, 16, 16, 16, 15]
+    for j, (text, w) in enumerate(zip(cols, widths), start=1):
+        cell = mc.cell(row=4, column=j, value=text)
+        cell.fill, cell.font = HEADER_FILL, HEADER_FONT
+        cell.alignment = Alignment(wrap_text=True, horizontal="center")
+        mc.column_dimensions[cell.column_letter].width = w
+    ns = [500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000]
+    for i, n in enumerate(ns):
+        row = 5 + i
+        plain = mc_price(S, K, T, r, sigma, "call", n_paths=n, antithetic=False,
+                         control_variate=False, seed=n)
+        red = mc_price(S, K, T, r, sigma, "call", n_paths=n, seed=n)
+        values = [n, bs, plain.price, plain.ci_low, plain.ci_high, red.price, red.ci_low,
+                  red.ci_high, plain.std_error / red.std_error]
+        for j, v in enumerate(values, start=1):
+            c = mc.cell(row=row, column=j, value=round(v, 6) if j > 1 else v)
+            c.border = BOX
+            c.number_format = "#,##0" if j == 1 else ("0.0" if j == 9 else "0.0000")
+    last = 4 + len(ns)
+
+    chart = LineChart()
+    chart.title = "MC price and 95% interval vs number of paths"
+    chart.x_axis.title = "Number of paths"
+    chart.y_axis.title = "Call price"
+    chart.height, chart.width = 9, 20
+    chart.add_data(Reference(mc, min_col=2, min_row=4, max_col=8, max_row=last), titles_from_data=True)
+    chart.set_categories(Reference(mc, min_col=1, min_row=5, max_row=last))
+    colors = ["000000", "9AA5B1", "C9CFD6", "C9CFD6", "1F6FEB", "8DB6F5", "8DB6F5"]
+    dashes = ["dash", None, "sysDot", "sysDot", None, "sysDot", "sysDot"]
+    for series, color, dash in zip(chart.series, colors, dashes):
+        series.graphicalProperties.line.solidFill = color
+        series.graphicalProperties.line.width = 22000
+        if dash:
+            series.graphicalProperties.line.dashStyle = dash
+        series.smooth = False
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.scaling.min = 9.5
+    chart.y_axis.scaling.max = 11.5
+    mc.add_chart(chart, f"A{last + 3}")
+
+    # American put: tree vs Longstaff-Schwartz
+    top = last + 23
+    mc[f"A{top}"] = "American put, Longstaff & Schwartz (2001) case: S=36, K=40, r=6%, vol=20%, T=1"
+    mc[f"A{top}"].font = BOLD
+    rows = [("European put (Black-Scholes)", bs_price(36, 40, 1, 0.06, 0.20, "put"), None),
+            ("American put, CRR tree 2,000 steps", crr_price(36, 40, 1, 0.06, 0.20, "put",
+                                                              steps=2000, american=True), None)]
+    lsm = lsm_price(36, 40, 1, 0.06, 0.20, "put", n_paths=100_000, steps=50, seed=1)
+    rows.append(("American put, LSM 100,000 paths, 50 dates", lsm.price, lsm.std_error))
+    rows.append(("Paper, finite differences (reference grid)", 4.478, None))
+    rows.append(("Paper, LSM simulation", 4.472, 0.010))
+    for j, text in enumerate(["Method", "Price", "Std error"], start=1):
+        cell = mc.cell(row=top + 1, column=j, value=text)
+        cell.fill, cell.font = HEADER_FILL, HEADER_FONT
+    for i, (label, price, se) in enumerate(rows):
+        row = top + 2 + i
+        mc.cell(row=row, column=1, value=label)
+        c = mc.cell(row=row, column=2, value=round(price, 6))
+        c.number_format, c.border = "0.0000", BOX
+        if se is not None:
+            c = mc.cell(row=row, column=3, value=round(se, 6))
+            c.number_format, c.border = "0.0000", BOX
+    mc.cell(row=top + 7, column=1, value=(
+        "The tree is stable at 4.4867 from 1,000 to 20,000 steps; the paper's 4.478 comes from a coarser "
+        "grid. LSM is noisy (s.e. above) and slightly biased low (estimated exercise rule).")).font = Font(
+        italic=True, color="666666")
+    mc.column_dimensions["A"].width = 42
+    mc.freeze_panes = "A5"
 
 
 if __name__ == "__main__":

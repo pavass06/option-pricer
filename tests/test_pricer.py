@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from option_pricer import bs_price, bs_greeks, implied_vol, mc_price, crr_price
+from option_pricer import bs_price, bs_greeks, implied_vol, mc_price, crr_price, lsm_price
 
 
 # --- Reference values -------------------------------------------------------
@@ -21,13 +21,32 @@ def test_haug_reference_value():
 
 def test_american_put_longstaff_schwartz_reference():
     # Longstaff & Schwartz (2001), Table 1: S=36, K=40, r=6%, sigma=20%, T=1.
-    # European put 3.844; American put 4.478 by their finite-difference grid.
-    # High-resolution lattices converge to ~4.4867 (the value commonly used as
-    # benchmark in later LSM papers), so we accept both within 0.01.
+    # European put 3.844; American put 4.478 by their finite-difference grid,
+    # 4.472 (s.e. 0.010) by their LSM simulation.
+    # The CRR tree is stable at 4.4867 from 1,000 to 20,000 steps: this is the
+    # converged lattice value.
+    # The 0.009 gap with 4.478 comes from the coarser reference grid, not from
+    # this tree, so we check both: tight against 4.4867, loose against 4.478.
     am = crr_price(36, 40, 1, 0.06, 0.20, "put", steps=2000, american=True)
     assert am == pytest.approx(4.4867, abs=1e-3)
     assert am == pytest.approx(4.478, abs=1e-2)
     assert bs_price(36, 40, 1, 0.06, 0.20, "put") == pytest.approx(3.844, abs=1e-3)
+
+
+@pytest.mark.parametrize("S,T,sigma", [(36, 1, 0.20), (44, 1, 0.20), (40, 2, 0.40)])
+def test_lsm_matches_tree(S, T, sigma):
+    # LSM is biased slightly low (estimated exercise rule) and noisy:
+    # accept 3 standard errors plus a 0.03 bias allowance.
+    tree = crr_price(S, 40, T, 0.06, sigma, "put", steps=2000, american=True)
+    res = lsm_price(S, 40, T, 0.06, sigma, "put", n_paths=40_000, steps=50 * T, seed=3)
+    assert abs(res.price - tree) < 3 * res.std_error + 0.03
+    assert res.price > bs_price(S, 40, T, 0.06, sigma, "put")
+
+
+def test_lsm_call_without_dividend_is_european():
+    res = lsm_price(100, 100, 1, 0.05, 0.2, "call", n_paths=40_000, seed=4)
+    bs = bs_price(100, 100, 1, 0.05, 0.2, "call")
+    assert abs(res.price - bs) < 3 * res.std_error + 0.02
 
 
 # --- No-arbitrage relations ---------------------------------------------------
@@ -131,3 +150,14 @@ def test_invalid_inputs():
         bs_price(100, 100, 0, 0.05, 0.2)
     with pytest.raises(ValueError):
         bs_price(100, 100, 1, 0.05, 0.2, kind="straddle")
+
+
+def test_antithetic_pairs_with_odd_number_of_paths():
+    # Regression test: with an odd n_paths the pairs (Z, -Z) used to be shifted
+    # by one row, which silently removed the antithetic variance reduction.
+    odd = mc_price(100, 100, 1, 0.05, 0.2, "call", n_paths=20_001,
+                   antithetic=True, control_variate=False, seed=5)
+    plain = mc_price(100, 100, 1, 0.05, 0.2, "call", n_paths=20_001,
+                     antithetic=False, control_variate=False, seed=5)
+    assert odd.n_paths == 20_002
+    assert odd.std_error < 0.85 * plain.std_error
