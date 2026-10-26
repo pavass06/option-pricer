@@ -27,7 +27,7 @@ A small, tested Python toolkit for pricing vanilla equity options, with a macro-
 Requires Python 3.9+.
 
 ```bash
-git clone https://github.com/<your-user>/option-pricer.git
+git clone https://github.com/pavass06/option-pricer.git
 cd option-pricer
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
